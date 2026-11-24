@@ -6,11 +6,18 @@ import {
   printClientHelp,
   printQuit,
 } from "../internal/gamelogic/gamelogic.js";
-import { declareAndBind, SimpleQueueType } from "../internal/pubsub/consume.js";
-import { ExchangePerilDirect, PauseKey } from "../internal/routing/routing.js";
+import { SimpleQueueType, subscribeJSON } from "../internal/pubsub/consume.js";
+import {
+  ArmyMovesPrefix,
+  ExchangePerilDirect,
+  ExchangePerilTopic,
+  PauseKey,
+} from "../internal/routing/routing.js";
 import { GameState } from "../internal/gamelogic/gamestate.js";
 import { commandSpawn } from "../internal/gamelogic/spawn.js";
 import { commandMove } from "../internal/gamelogic/move.js";
+import { handlerMove, handlerPause } from "./handlers.js";
+import { publishJSON } from "../internal/pubsub/publish.js";
 
 async function main() {
   const rabbitConnString = "amqp://guest:guest@localhost:5672/";
@@ -30,17 +37,29 @@ async function main() {
     }),
   );
 
+  const publishCh = await conn.createConfirmChannel();
+
   const username = await clientWelcome();
 
-  await declareAndBind(
+  const gs = new GameState(username);
+
+  await subscribeJSON(
     conn,
     ExchangePerilDirect,
     `${PauseKey}.${username}`,
     PauseKey,
     SimpleQueueType.Transient,
+    handlerPause(gs),
   );
 
-  const gs = new GameState(username);
+  await subscribeJSON(
+    conn,
+    ExchangePerilTopic,
+    `${ArmyMovesPrefix}.${username}`,
+    `${ArmyMovesPrefix}.*`,
+    SimpleQueueType.Transient,
+    handlerMove(gs),
+  );
 
   while (true) {
     const words = await getInput();
@@ -50,7 +69,14 @@ async function main() {
     const command = words[0];
     if (command === "move") {
       try {
-        commandMove(gs, words);
+        const moved = commandMove(gs, words);
+        await publishJSON(
+          publishCh,
+          ExchangePerilTopic,
+          `${ArmyMovesPrefix}.${username}`,
+          moved,
+        );
+        console.log("Move published successfully!");
       } catch (err) {
         console.log((err as Error).message);
       }
